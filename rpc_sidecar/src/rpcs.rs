@@ -1,6 +1,14 @@
 //! The set of JSON-RPCs which the API server handles.
 
-use std::{convert::TryFrom, fmt, net::IpAddr, num::NonZeroU32, str, sync::Arc, time::Duration};
+use std::{
+    convert::TryFrom,
+    fmt,
+    net::{SocketAddr, TcpListener},
+    num::NonZeroU32,
+    str,
+    sync::Arc,
+    time::Duration,
+};
 
 pub mod account;
 pub mod chain;
@@ -30,6 +38,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as SerdeError};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
+use tokio_stream::wrappers::TcpListenerStream;
 use tracing::{debug, info};
 use warp::{
     Filter,
@@ -52,6 +61,11 @@ pub use error_code::ErrorCode;
 use crate::{ClientError, NodeClient};
 
 pub const CURRENT_API_VERSION: ApiVersion = ApiVersion(SemVer::new(2, 0, 0));
+
+pub(crate) enum BindTarget {
+    SocketAddr(SocketAddr),
+    Inherited(TcpListener),
+}
 
 /// This setting causes the server to ignore extra fields in JSON-RPC requests other than the
 /// standard 'id', 'jsonrpc', 'method', and 'params' fields.
@@ -321,12 +335,11 @@ async fn handle_rejection(error: Rejection) -> Result<impl Reply, Rejection> {
 
 /// The actual service runner, common to `run()` and `run_with_cors()`.
 async fn run_service(
-    ip_address: IpAddr,
-    port: u16,
+    bind_target: BindTarget,
     service_routes: BoxedFilter<(impl Reply + 'static,)>,
     server_name: &'static str,
     qps_limit: NonZeroU32,
-) {
+) -> std::io::Result<()> {
     let limiter = Arc::new(DefaultDirectRateLimiter::direct(Quota::per_second(
         qps_limit,
     )));
@@ -352,33 +365,50 @@ async fn run_service(
         .with(warp::compression::gzip());
 
     let (shutdown_sender, shutdown_receiver) = oneshot::channel();
-    let (address, server_with_shutdown) = warp::serve(
-        requrst_limit
-            .and(service_routes_gzip.or(service_routes.clone()))
-            .recover(handle_rejection),
-    )
-    .bind_with_graceful_shutdown((ip_address, port), async {
-        shutdown_receiver.await.ok();
-    });
-    info!(address = %address, "started {server_name} server");
-
-    let _ = tokio::spawn(server_with_shutdown).await;
+    match bind_target {
+        BindTarget::SocketAddr(address) => {
+            let routes = requrst_limit
+                .and(service_routes_gzip.or(service_routes.clone()))
+                .recover(handle_rejection);
+            let (listening_address, server_with_shutdown) = warp::serve(routes)
+                .bind_with_graceful_shutdown(address, async {
+                    shutdown_receiver.await.ok();
+                });
+            info!(address = %listening_address, "started {server_name} server");
+            let _ = tokio::spawn(server_with_shutdown).await;
+        }
+        BindTarget::Inherited(listener) => {
+            listener.set_nonblocking(true)?;
+            let address = listener.local_addr()?;
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            let incoming = TcpListenerStream::new(listener);
+            let routes = requrst_limit
+                .and(service_routes_gzip.or(service_routes.clone()))
+                .recover(handle_rejection);
+            let server_with_shutdown =
+                warp::serve(routes).serve_incoming_with_graceful_shutdown(incoming, async {
+                    shutdown_receiver.await.ok();
+                });
+            info!(address = %address, "started {server_name} server");
+            let _ = tokio::spawn(server_with_shutdown).await;
+        }
+    }
     let _ = shutdown_sender.send(());
     info!("{server_name} server shut down");
+    Ok(())
 }
 
-/// Start JSON RPC server with CORS enabled in a background.
+/// Start JSON RPC server with CORS enabled using an explicit bind target.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn run_with_cors(
-    ip_address: IpAddr,
-    port: u16,
+pub(super) async fn run_with_cors_bind_target(
+    bind_target: BindTarget,
     handlers: RequestHandlers,
     qps_limit: NonZeroU32,
     max_body_bytes: u64,
     api_path: &'static str,
     server_name: &'static str,
     cors_header: CorsOrigin,
-) {
+) -> std::io::Result<()> {
     let service_routes = casper_json_rpc::route_with_cors(
         api_path,
         max_body_bytes,
@@ -386,26 +416,25 @@ pub(super) async fn run_with_cors(
         ALLOW_UNKNOWN_FIELDS_IN_JSON_RPC_REQUEST,
         cors_header,
     );
-    run_service(ip_address, port, service_routes, server_name, qps_limit).await;
+    run_service(bind_target, service_routes, server_name, qps_limit).await
 }
 
-/// Start JSON RPC server in a background.
-pub(super) async fn run(
-    ip_address: IpAddr,
-    port: u16,
+/// Start JSON RPC server in a background using an explicit bind target.
+pub(super) async fn run_with_bind_target(
+    bind_target: BindTarget,
     handlers: RequestHandlers,
     qps_limit: NonZeroU32,
     max_body_bytes: u64,
     api_path: &'static str,
     server_name: &'static str,
-) {
+) -> std::io::Result<()> {
     let service_routes = casper_json_rpc::route(
         api_path,
         max_body_bytes,
         handlers,
         ALLOW_UNKNOWN_FIELDS_IN_JSON_RPC_REQUEST,
     );
-    run_service(ip_address, port, service_routes, server_name, qps_limit).await;
+    run_service(bind_target, service_routes, server_name, qps_limit).await
 }
 
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]

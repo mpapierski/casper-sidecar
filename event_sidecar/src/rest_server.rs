@@ -20,16 +20,23 @@ use warp::Filter;
 
 use self::metrics_layer::MetricsLayer;
 use crate::types::{config::RestApiServerConfig, database::DatabaseReader};
+use crate::utils::{BindTarget, bind_tcp_listener};
 
 pub async fn run_server<Db: DatabaseReader + Clone + Send + Sync + 'static>(
     config: RestApiServerConfig,
     database: Db,
+    inherited_listener: Option<TcpListener>,
 ) -> Result<(), Error> {
     let api = filters::combined_filters(database);
-    let address = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
-    let socket_address = SocketAddr::new(address, config.port);
-
-    let listener = TcpListener::bind(socket_address)?;
+    let bind_target = if let Some(listener) = inherited_listener {
+        BindTarget::Listener(listener)
+    } else {
+        let address = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let socket_address = SocketAddr::new(address, config.port);
+        BindTarget::SocketAddr(socket_address)
+    };
+    let (listener, listening_address) =
+        bind_tcp_listener(bind_target).map_err(|error| Error::msg(error.to_string()))?;
 
     let warp_service = warp::service(api.with(warp::cors().allow_any_origin()));
     let tower_service = ServiceBuilder::new()
@@ -40,7 +47,7 @@ pub async fn run_server<Db: DatabaseReader + Clone + Send + Sync + 'static>(
         )
         .layer(MetricsLayer::new(path_abstraction_for_metrics))
         .service(warp_service);
-    info!(address = %address, "started REST API server");
+    info!(address = %listening_address, "started REST API server");
     Server::from_tcp(listener)?
         .serve(Shared::new(Buffer::new(tower_service, 50)))
         .await?;

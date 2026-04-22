@@ -1,12 +1,14 @@
 pub mod component;
 mod config;
 mod run;
+mod socket_activation;
 
 use anyhow::{Context, Error};
 use backtrace::Backtrace;
 use clap::Parser;
 use config::{SidecarConfig, SidecarConfigTarget};
 use run::run;
+use socket_activation::ActivationSockets;
 use std::{
     env, fmt, io,
     panic::{self, PanicHookInfo},
@@ -46,6 +48,7 @@ fn main() -> Result<ExitCode, Error> {
     let config: SidecarConfig = config_serde.try_into()?;
     config.validate()?;
     info!("Configuration loaded");
+    let activation_sockets = ActivationSockets::parse_from_env()?;
 
     let max_worker_threads = config.max_thread_count.unwrap_or_else(num_cpus::get);
     let max_blocking_threads = config
@@ -59,7 +62,7 @@ fn main() -> Result<ExitCode, Error> {
         .max_blocking_threads(max_blocking_threads)
         .build()
         .expect("Failed building sidecar runtime")
-        .block_on(run(config))
+        .block_on(run(config, activation_sockets))
 }
 
 pub fn read_config(config_path: &str) -> Result<SidecarConfigTarget, Error> {

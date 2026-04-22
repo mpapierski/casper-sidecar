@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::IpAddr, num::NonZeroU32, sync::Arc};
 use casper_json_rpc::{ConfigLimit, CorsOrigin, RequestHandlersBuilder};
 
 use super::rpcs::{
-    RpcWithOptionalParams, RpcWithParams, RpcWithoutParams,
+    BindTarget, RpcWithOptionalParams, RpcWithParams, RpcWithoutParams,
     account::{PutDeploy, PutTransaction},
     chain::{
         GetBlock, GetBlockTransfers, GetEraInfoBySwitchBlock, GetEraSummary, GetStateRootHash,
@@ -35,11 +35,35 @@ pub async fn run(
     ip_address: IpAddr,
     port: u16,
     default_limit: ConfigLimit,
-    mut limits: HashMap<String, ConfigLimit>,
+    limits: HashMap<String, ConfigLimit>,
     qps_limit: NonZeroU32,
     max_body_bytes: u64,
     cors_origin: String,
 ) {
+    run_with_bind_target(
+        node,
+        BindTarget::SocketAddr(std::net::SocketAddr::new(ip_address, port)),
+        default_limit,
+        limits,
+        qps_limit,
+        max_body_bytes,
+        cors_origin,
+    )
+    .await
+    .expect("config-based JSON RPC bind target should not fail");
+}
+
+/// Run the JSON-RPC server with an explicit bind target.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_with_bind_target(
+    node: Arc<dyn NodeClient>,
+    bind_target: BindTarget,
+    default_limit: ConfigLimit,
+    mut limits: HashMap<String, ConfigLimit>,
+    qps_limit: NonZeroU32,
+    max_body_bytes: u64,
+    cors_origin: String,
+) -> std::io::Result<()> {
     let mut handlers = RequestHandlersBuilder::new();
 
     macro_rules! register {
@@ -81,21 +105,19 @@ pub async fn run(
 
     match cors_origin.as_str() {
         "" => {
-            super::rpcs::run(
-                ip_address,
-                port,
+            super::rpcs::run_with_bind_target(
+                bind_target,
                 handlers,
                 qps_limit,
                 max_body_bytes,
                 RPC_API_PATH,
                 RPC_API_SERVER_NAME,
             )
-            .await;
+            .await
         }
         "*" => {
-            super::rpcs::run_with_cors(
-                ip_address,
-                port,
+            super::rpcs::run_with_cors_bind_target(
+                bind_target,
                 handlers,
                 qps_limit,
                 max_body_bytes,
@@ -103,12 +125,11 @@ pub async fn run(
                 RPC_API_SERVER_NAME,
                 CorsOrigin::Any,
             )
-            .await;
+            .await
         }
         _ => {
-            super::rpcs::run_with_cors(
-                ip_address,
-                port,
+            super::rpcs::run_with_cors_bind_target(
+                bind_target,
                 handlers,
                 qps_limit,
                 max_body_bytes,
@@ -116,7 +137,7 @@ pub async fn run(
                 RPC_API_SERVER_NAME,
                 CorsOrigin::Specified(cors_origin),
             )
-            .await;
+            .await
         }
     }
 }

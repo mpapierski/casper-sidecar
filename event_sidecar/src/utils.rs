@@ -9,7 +9,7 @@ use std::time::Instant;
 use std::{
     fmt::{self, Debug, Display, Formatter},
     io,
-    net::{SocketAddr, ToSocketAddrs},
+    net::{SocketAddr, TcpListener, ToSocketAddrs},
 };
 use thiserror::Error;
 #[cfg(feature = "additional-metrics")]
@@ -72,6 +72,54 @@ pub(crate) fn resolve_address(address: &str) -> Result<SocketAddr, ResolveAddres
             address: address.to_string(),
             kind: ResolveAddressErrorKind::NoAddressFound,
         })
+}
+
+pub(crate) enum BindTarget {
+    SocketAddr(SocketAddr),
+    Listener(TcpListener),
+}
+
+pub(crate) fn bind_tcp_listener(
+    bind_target: BindTarget,
+) -> Result<(TcpListener, SocketAddr), ListeningError> {
+    match bind_target {
+        BindTarget::SocketAddr(address) => {
+            let listener = TcpListener::bind(address).map_err(|error| ListeningError::Listen {
+                address,
+                error: Box::new(error),
+            })?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|error| ListeningError::Listen {
+                    address,
+                    error: Box::new(error),
+                })?;
+            let listening_address =
+                listener
+                    .local_addr()
+                    .map_err(|error| ListeningError::Listen {
+                        address,
+                        error: Box::new(error),
+                    })?;
+            Ok((listener, listening_address))
+        }
+        BindTarget::Listener(listener) => {
+            listener
+                .set_nonblocking(true)
+                .map_err(|error| ListeningError::Initializing {
+                    address: "inherited listener".to_string(),
+                    error: Box::new(error),
+                })?;
+            let listening_address =
+                listener
+                    .local_addr()
+                    .map_err(|error| ListeningError::Initializing {
+                        address: "inherited listener".to_string(),
+                        error: Box::new(error),
+                    })?;
+            Ok((listener, listening_address))
+        }
+    }
 }
 
 /// An error starting one of the HTTP servers.

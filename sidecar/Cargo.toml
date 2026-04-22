@@ -42,6 +42,9 @@ casper-rpc-sidecar = { workspace = true, features = ["testing"] }
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.2", features = ["fs", "socket"] }
+
 [package.metadata.deb]
 revision = "0"
 assets = [
@@ -77,4 +80,3 @@ revision = "0+jammy"
 [package.metadata.deb.variants.noble]
 name = "casper-sidecar"
 revision = "0+noble"
-

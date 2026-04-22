@@ -272,7 +272,8 @@ impl TestFixture {
                 .unwrap_or(Config::test_default().max_concurrent_subscribers),
             ..Config::test_default()
         };
-        let mut server = EventStreamServer::new(config, self.storage_dir.path(), true).unwrap();
+        let mut server =
+            EventStreamServer::new(config, self.storage_dir.path(), true, None).unwrap();
 
         self.first_event_id = server.event_indexer.current_index();
 

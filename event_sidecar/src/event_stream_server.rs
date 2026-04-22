@@ -27,7 +27,7 @@ mod http_server;
 mod sse_server;
 #[cfg(test)]
 mod tests;
-use crate::utils::{ListeningError, resolve_address};
+use crate::utils::{BindTarget, ListeningError, bind_tcp_listener, resolve_address};
 use casper_event_types::{Filter as SseFilter, sse_data::SseData};
 pub use config::Config;
 use event_indexer::{EventIndex, EventIndexer};
@@ -37,6 +37,7 @@ use tokio::sync::{
     mpsc::{self, UnboundedSender},
     oneshot,
 };
+use tokio_stream::wrappers::TcpListenerStream;
 use tracing::{info, warn};
 use warp::Filter;
 
@@ -67,8 +68,13 @@ impl EventStreamServer {
         config: Config,
         storage_path: &Path,
         enable_legacy_filters: bool,
+        inherited_listener: Option<std::net::TcpListener>,
     ) -> Result<Self, ListeningError> {
-        let required_address = resolve_address_and_retype(&config.address)?;
+        let bind_target = if let Some(listener) = inherited_listener {
+            BindTarget::Listener(listener)
+        } else {
+            BindTarget::SocketAddr(resolve_address_and_retype(&config.address)?)
+        };
         let event_indexer =
             EventIndexer::new(storage_path).map_err(|e| ListeningError::Initializing {
                 address: config.address.clone(),
@@ -87,15 +93,18 @@ impl EventStreamServer {
             enable_legacy_filters,
         );
         let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
-        let (listening_address, server_with_shutdown) =
-            warp::serve(sse_filter.with(warp::cors().allow_any_origin()))
-                .try_bind_with_graceful_shutdown(required_address, async {
-                    shutdown_receiver.await.ok();
-                })
-                .map_err(|error| ListeningError::Listen {
-                    address: required_address,
-                    error: Box::new(error),
-                })?;
+        let (listener, listening_address) = bind_tcp_listener(bind_target)?;
+        let listener = tokio::net::TcpListener::from_std(listener).map_err(|error| {
+            ListeningError::Initializing {
+                address: listening_address.to_string(),
+                error: Box::new(error),
+            }
+        })?;
+        let incoming = TcpListenerStream::new(listener);
+        let server_with_shutdown = warp::serve(sse_filter.with(warp::cors().allow_any_origin()))
+            .serve_incoming_with_graceful_shutdown(incoming, async {
+                shutdown_receiver.await.ok();
+            });
         info!(address=%listening_address, "started event stream server");
 
         tokio::spawn(http_server::run(

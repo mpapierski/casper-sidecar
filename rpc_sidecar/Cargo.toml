@@ -39,6 +39,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde-map-to-array = "1.1"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.6", features = ["codec"] }
 tracing = { workspace = true, default-features = true }
 warp = { workspace = true, features = ["compression"] }

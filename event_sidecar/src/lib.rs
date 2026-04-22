@@ -13,7 +13,10 @@ pub(crate) mod tests;
 mod types;
 mod utils;
 
-use std::{collections::HashMap, path::Path, process::ExitCode, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, net::TcpListener, path::Path, process::ExitCode, sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Error};
 use api_version_manager::{ApiVersionManager, GuardedApiVersionManager};
@@ -35,7 +38,7 @@ use tokio::{
     task::JoinHandle,
     time::sleep,
 };
-use tracing::{error, info};
+use tracing::error;
 #[cfg(feature = "additional-metrics")]
 use utils::start_metrics_thread;
 
@@ -45,7 +48,10 @@ use crate::{
     types::{config::LegacySseApiTag, sse_events::*},
 };
 
-pub use admin_server::run_server as run_admin_server;
+pub use admin_server::{
+    run_server as run_admin_server,
+    run_server_with_inherited_listener as run_admin_server_with_inherited_listener,
+};
 pub use database::DatabaseConfigError;
 pub use types::{
     config::{
@@ -63,6 +69,25 @@ pub async fn run(
     maybe_database: Option<Database>,
     maybe_network_name: Option<String>,
     sidecar_event_sender: Option<BroadcastSender<SidecarEvent>>,
+) -> Result<ExitCode, Error> {
+    run_with_inherited_listener(
+        config,
+        index_storage_folder,
+        maybe_database,
+        maybe_network_name,
+        sidecar_event_sender,
+        None,
+    )
+    .await
+}
+
+pub async fn run_with_inherited_listener(
+    config: SseEventServerConfig,
+    index_storage_folder: String,
+    maybe_database: Option<Database>,
+    maybe_network_name: Option<String>,
+    sidecar_event_sender: Option<BroadcastSender<SidecarEvent>>,
+    inherited_listener: Option<TcpListener>,
 ) -> Result<ExitCode, Error> {
     validate_config(&config)?;
     let (event_listeners, sse_data_receivers) = build_event_listeners(&config, maybe_network_name)?;
@@ -89,8 +114,8 @@ pub async fn run(
             .emulate_legacy_sse_apis
             .as_ref()
             .is_some_and(|v| v.contains(&LegacySseApiTag::V1)),
+        inherited_listener,
     );
-    info!(address = %config.event_stream_server.port, "started {} server", "SSE");
     tokio::try_join!(
         flatten_handle(event_broadcasting_handle),
         flatten_handle(listening_task_handle),
@@ -103,6 +128,7 @@ fn start_event_broadcasting(
     index_storage_folder: String,
     mut outbound_sse_data_receiver: Receiver<(SseData, Option<Filter>)>,
     enable_legacy_filters: bool,
+    inherited_listener: Option<TcpListener>,
 ) -> JoinHandle<Result<(), Error>> {
     let event_stream_server_port = config.event_stream_server.port;
     let buffer_length = config.event_stream_server.event_stream_buffer_length;
@@ -117,6 +143,7 @@ fn start_event_broadcasting(
             ),
             Path::new(&index_storage_folder),
             enable_legacy_filters,
+            inherited_listener,
         )
         .context("Error starting EventStreamServer")?;
         while let Some((sse_data, inbound_filter)) = outbound_sse_data_receiver.recv().await {
@@ -235,9 +262,21 @@ pub async fn run_rest_server(
     rest_server_config: RestApiServerConfig,
     database: Database,
 ) -> Result<ExitCode, Error> {
+    run_rest_server_with_inherited_listener(rest_server_config, database, None).await
+}
+
+pub async fn run_rest_server_with_inherited_listener(
+    rest_server_config: RestApiServerConfig,
+    database: Database,
+    inherited_listener: Option<TcpListener>,
+) -> Result<ExitCode, Error> {
     match database {
-        Database::SqliteDatabaseWrapper(db) => start_rest_server(rest_server_config, db).await,
-        Database::PostgreSqlDatabaseWrapper(db) => start_rest_server(rest_server_config, db).await,
+        Database::SqliteDatabaseWrapper(db) => {
+            start_rest_server(rest_server_config, db, inherited_listener).await
+        }
+        Database::PostgreSqlDatabaseWrapper(db) => {
+            start_rest_server(rest_server_config, db, inherited_listener).await
+        }
     }
     .map(|()| ExitCode::SUCCESS)
 }

@@ -1,10 +1,11 @@
 use anyhow::Error;
 use async_trait::async_trait;
 use casper_event_sidecar::{
-    LazyDatabaseWrapper, run as run_sse_sidecar, run_admin_server, run_rest_server,
+    LazyDatabaseWrapper, run_admin_server_with_inherited_listener,
+    run_rest_server_with_inherited_listener, run_with_inherited_listener,
 };
 use casper_event_types::SidecarEvent;
-use casper_rpc_sidecar::build_rpc_server;
+use casper_rpc_sidecar::build_rpc_server_with_inherited_listeners;
 use derive_new::new;
 use futures::{FutureExt, future::BoxFuture};
 use std::{
@@ -14,7 +15,10 @@ use std::{
 use tokio::sync::broadcast::Sender;
 use tracing::info;
 
-use crate::config::SidecarConfig;
+use crate::{
+    config::SidecarConfig,
+    socket_activation::{ActivationName, ActivationSockets},
+};
 
 #[derive(Debug)]
 pub enum ComponentError {
@@ -70,7 +74,7 @@ impl Display for ComponentError {
 /// Abstraction for an individual component of sidecar. The assumption is that this should be
 /// a long running task that is spawned into the tokio runtime.
 #[async_trait]
-pub trait Component {
+pub(crate) trait Component {
     fn name(&self) -> String;
     /// A component can self-declare that it needs more time to set up to bypass the default mechanism we use to interrupt
     /// stale components.
@@ -82,11 +86,12 @@ pub trait Component {
     async fn prepare_component_task(
         &self,
         config: &SidecarConfig,
+        activation_sockets: &mut ActivationSockets,
     ) -> Result<Option<BoxFuture<'_, Result<ExitCode, ComponentError>>>, ComponentError>;
 }
 
 #[derive(new)]
-pub struct SseServerComponent {
+pub(crate) struct SseServerComponent {
     maybe_database: Option<LazyDatabaseWrapper>,
     sidecar_event_sender: Option<Sender<SidecarEvent>>,
 }
@@ -96,7 +101,9 @@ impl Component for SseServerComponent {
     async fn prepare_component_task(
         &self,
         config: &SidecarConfig,
+        activation_sockets: &mut ActivationSockets,
     ) -> Result<Option<BoxFuture<'_, Result<ExitCode, ComponentError>>>, ComponentError> {
+        let inherited_listener = activation_sockets.take(ActivationName::SsePublish);
         if let (maybe_database, Some(sse_server_config), Some(storage_config)) =
             (&self.maybe_database, &config.sse_server, &config.storage)
         {
@@ -116,12 +123,13 @@ impl Component for SseServerComponent {
                 };
 
                 // If sse server is configured, both storage config and database must be "Some" here. This should be ensured by prior validation.
-                let future = run_sse_sidecar(
+                let future = run_with_inherited_listener(
                     sse_server_config.clone(),
                     storage_config.storage_folder.clone(),
                     maybe_database,
                     config.network_name.clone(),
                     self.sidecar_event_sender.clone(),
+                    inherited_listener,
                 )
                 .map(|res| res.map_err(|e| ComponentError::runtime_error(self.name(), e)));
                 Ok(Some(Box::pin(future)))
@@ -141,7 +149,7 @@ impl Component for SseServerComponent {
 }
 
 #[derive(new)]
-pub struct RestApiComponent {
+pub(crate) struct RestApiComponent {
     maybe_database: Option<LazyDatabaseWrapper>,
 }
 
@@ -150,15 +158,21 @@ impl Component for RestApiComponent {
     async fn prepare_component_task(
         &self,
         config: &SidecarConfig,
+        activation_sockets: &mut ActivationSockets,
     ) -> Result<Option<BoxFuture<'_, Result<ExitCode, ComponentError>>>, ComponentError> {
+        let inherited_listener = activation_sockets.take(ActivationName::RestApi);
         if let (Some(config), Some(database)) = (&config.rest_api_server, &self.maybe_database) {
             if config.enable_server {
                 let database =
                     database.acquire().await.as_ref().map_err(|db_err| {
                         ComponentError::runtime_error(self.name(), db_err.into())
                     })?;
-                let future = run_rest_server(config.clone(), database.clone())
-                    .map(|res| res.map_err(|e| ComponentError::runtime_error(self.name(), e)));
+                let future = run_rest_server_with_inherited_listener(
+                    config.clone(),
+                    database.clone(),
+                    inherited_listener,
+                )
+                .map(|res| res.map_err(|e| ComponentError::runtime_error(self.name(), e)));
                 Ok(Some(Box::pin(future)))
             } else {
                 info!("REST API server is disabled. Skipping...");
@@ -176,18 +190,21 @@ impl Component for RestApiComponent {
 }
 
 #[derive(new)]
-pub struct AdminApiComponent;
+pub(crate) struct AdminApiComponent;
 
 #[async_trait]
 impl Component for AdminApiComponent {
     async fn prepare_component_task(
         &self,
         config: &SidecarConfig,
+        activation_sockets: &mut ActivationSockets,
     ) -> Result<Option<BoxFuture<'_, Result<ExitCode, ComponentError>>>, ComponentError> {
+        let inherited_listener = activation_sockets.take(ActivationName::AdminApi);
         if let Some(config) = &config.admin_api_server {
             if config.enable_server {
-                let future = run_admin_server(config.clone())
-                    .map(|res| res.map_err(|e| ComponentError::runtime_error(self.name(), e)));
+                let future =
+                    run_admin_server_with_inherited_listener(config.clone(), inherited_listener)
+                        .map(|res| res.map_err(|e| ComponentError::runtime_error(self.name(), e)));
                 Ok(Some(Box::pin(future)))
             } else {
                 info!("Admin API server is disabled. Skipping.");
@@ -205,7 +222,7 @@ impl Component for AdminApiComponent {
 }
 
 #[derive(new)]
-pub struct RpcApiComponent {
+pub(crate) struct RpcApiComponent {
     sidecar_event_sender: Sender<SidecarEvent>,
 }
 
@@ -217,7 +234,11 @@ impl Component for RpcApiComponent {
     async fn prepare_component_task(
         &self,
         config: &SidecarConfig,
+        activation_sockets: &mut ActivationSockets,
     ) -> Result<Option<BoxFuture<'_, Result<ExitCode, ComponentError>>>, ComponentError> {
+        let inherited_main_listener = activation_sockets.take(ActivationName::RpcMain);
+        let inherited_speculative_listener =
+            activation_sockets.take(ActivationName::RpcSpeculative);
         if let Some(rpc_server_config) = config.rpc_server.as_ref() {
             let is_main_exec_defined = rpc_server_config.main_server.enable_server;
             let is_speculative_exec_defined = rpc_server_config
@@ -235,10 +256,12 @@ impl Component for RpcApiComponent {
             if !is_speculative_exec_defined {
                 info!("Speculative RPC API server is disabled. Only main RPC API will be running.");
             }
-            let res = build_rpc_server(
+            let res = build_rpc_server_with_inherited_listeners(
                 rpc_server_config.clone(),
                 config.network_name.clone(),
                 self.sidecar_event_sender.clone(),
+                inherited_main_listener,
+                inherited_speculative_listener,
             )
             .await;
             match res {
@@ -283,7 +306,10 @@ mod tests {
     async fn given_sse_server_component_when_no_db_but_config_defined_should_return_some() {
         let component = SseServerComponent::new(None, None);
         let config = all_components_all_enabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_some());
     }
@@ -293,7 +319,10 @@ mod tests {
         let component = SseServerComponent::new(Some(LazyDatabaseWrapper::for_tests()), None);
         let mut config = all_components_all_disabled();
         config.sse_server = None;
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }
@@ -302,7 +331,10 @@ mod tests {
     async fn given_sse_server_component_when_config_disabled_should_return_none() {
         let component = SseServerComponent::new(Some(LazyDatabaseWrapper::for_tests()), None);
         let config = all_components_all_disabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }
@@ -311,7 +343,10 @@ mod tests {
     async fn given_sse_server_component_when_db_and_config_should_return_some() {
         let component = SseServerComponent::new(Some(LazyDatabaseWrapper::for_tests()), None);
         let config = all_components_all_enabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_some());
     }
@@ -320,7 +355,10 @@ mod tests {
     async fn given_rest_api_server_component_when_no_db_should_return_none() {
         let component = RestApiComponent::new(None);
         let config = all_components_all_enabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }
@@ -330,7 +368,10 @@ mod tests {
         let component = RestApiComponent::new(Some(LazyDatabaseWrapper::for_tests()));
         let mut config = all_components_all_disabled();
         config.rest_api_server = None;
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }
@@ -339,7 +380,10 @@ mod tests {
     async fn given_rest_api_server_component_when_config_disabled_should_return_none() {
         let component = RestApiComponent::new(Some(LazyDatabaseWrapper::for_tests()));
         let config = all_components_all_disabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }
@@ -348,7 +392,10 @@ mod tests {
     async fn given_rest_api_server_component_when_db_and_config_should_return_some() {
         let component = RestApiComponent::new(Some(LazyDatabaseWrapper::for_tests()));
         let config = all_components_all_enabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_some());
     }
@@ -358,7 +405,10 @@ mod tests {
         let component = AdminApiComponent::new();
         let mut config = all_components_all_disabled();
         config.admin_api_server = None;
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }
@@ -367,7 +417,10 @@ mod tests {
     async fn given_admin_api_server_component_when_config_disabled_should_return_none() {
         let component = AdminApiComponent::new();
         let config = all_components_all_disabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }
@@ -376,7 +429,10 @@ mod tests {
     async fn given_admin_api_server_component_when_config_should_return_some() {
         let component = AdminApiComponent::new();
         let config = all_components_all_enabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_some());
     }
@@ -386,7 +442,10 @@ mod tests {
         let (rx, _) = broadcast::channel(1);
         let component = RpcApiComponent::new(rx);
         let config = all_components_all_disabled();
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }
@@ -422,7 +481,10 @@ mod tests {
         speculative_exec_server_config.ip_address = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
         speculative_exec_server_config.port = port;
 
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_some());
     }
@@ -433,7 +495,10 @@ mod tests {
         let component = RpcApiComponent::new(rx);
         let mut config = all_components_all_disabled();
         config.rpc_server = None;
-        let res = component.prepare_component_task(&config).await;
+        let mut activation_sockets = ActivationSockets::default();
+        let res = component
+            .prepare_component_task(&config, &mut activation_sockets)
+            .await;
         assert!(res.is_ok());
         assert!(res.unwrap().is_none());
     }

@@ -1,5 +1,6 @@
 use crate::component::*;
 use crate::config::SidecarConfig;
+use crate::socket_activation::ActivationSockets;
 use anyhow::{Context, Error, anyhow};
 use casper_event_sidecar::LazyDatabaseWrapper;
 use std::{process::ExitCode, time::Duration};
@@ -13,7 +14,10 @@ use tracing::{error, info};
 const DEFAULT_COMPONENT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const LONG_COMPONENT_STARTUP_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 
-pub async fn run(config: SidecarConfig) -> Result<ExitCode, Error> {
+pub async fn run(
+    config: SidecarConfig,
+    activation_sockets: ActivationSockets,
+) -> Result<ExitCode, Error> {
     let (tx, _) = broadcast::channel(16);
     let maybe_database = config
         .storage
@@ -46,7 +50,7 @@ pub async fn run(config: SidecarConfig) -> Result<ExitCode, Error> {
             info!("Received SIGINT signal. Shutting down...");
             Ok(ExitCode::SUCCESS)
         },
-        res = do_run(config, components) => res.map_err(|component_error| {
+        res = do_run(config, components, activation_sockets) => res.map_err(|component_error| {
             error!("The server has exited with an error: {component_error}");
             anyhow!(component_error.to_string())
         }),
@@ -56,6 +60,7 @@ pub async fn run(config: SidecarConfig) -> Result<ExitCode, Error> {
 async fn do_run(
     config: SidecarConfig,
     components: Vec<Box<dyn Component>>,
+    mut activation_sockets: ActivationSockets,
 ) -> Result<ExitCode, ComponentError> {
     let mut component_futures = Vec::new();
     for component in &components {
@@ -65,8 +70,11 @@ async fn do_run(
             DEFAULT_COMPONENT_STARTUP_TIMEOUT
         };
         let component_name = component.name();
-        let component_startup_res =
-            timeout(startup_duration, component.prepare_component_task(&config)).await;
+        let component_startup_res = timeout(
+            startup_duration,
+            component.prepare_component_task(&config, &mut activation_sockets),
+        )
+        .await;
         if component_startup_res.is_err() {
             return Err(ComponentError::Initialization {
                 component_name: component_name.clone(),

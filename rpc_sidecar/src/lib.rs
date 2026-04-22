@@ -8,7 +8,7 @@ mod speculative_exec_server;
 #[cfg(any(feature = "testing", test))]
 pub mod testing;
 
-use std::{process::ExitCode, sync::Arc};
+use std::{net::TcpListener, process::ExitCode, sync::Arc};
 
 use anyhow::Error;
 use caching_node_client::{CachingNodeClient, cache_update_loop};
@@ -39,6 +39,111 @@ pub async fn build_rpc_server<'a>(
     maybe_network_name: Option<String>,
     sidecar_event_sender: Sender<SidecarEvent>,
 ) -> MaybeRpcServerReturn<'a> {
+    build_rpc_server_with_inherited_listeners(
+        config,
+        maybe_network_name,
+        sidecar_event_sender,
+        None,
+        None,
+    )
+    .await
+}
+
+#[cfg(all(test, unix))]
+mod inherited_listener_tests {
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
+        sync::Arc,
+        time::Duration,
+    };
+
+    use hyper::{Body, Client, Request};
+    use serde_json::Value;
+    use tokio::{
+        sync::{Notify, broadcast},
+        time::sleep,
+    };
+
+    use super::*;
+    use crate::testing::{get_port, start_mock_binary_port_responding_with_stored_value};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_start_main_rpc_server_from_inherited_listener() {
+        let binary_port = get_port();
+        let shutdown = Arc::new(Notify::new());
+        let mock_server_handle = start_mock_binary_port_responding_with_stored_value(
+            binary_port,
+            None,
+            None,
+            Arc::clone(&shutdown),
+        )
+        .await;
+
+        let inherited_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let inherited_address = inherited_listener.local_addr().unwrap();
+
+        let mut config = RpcServerConfig::test_default();
+        config.node_client = NodeClientConfig::new_with_port_and_retries(binary_port, 1);
+        config.speculative_exec_server = None;
+        config.main_server.ip_address = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        config.main_server.port = get_port();
+        assert_ne!(config.main_server.port, inherited_address.port());
+
+        let (sender, _) = broadcast::channel(1);
+        let server_future = build_rpc_server_with_inherited_listeners(
+            config,
+            None,
+            sender,
+            Some(inherited_listener),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let server_handle = tokio::spawn(server_future);
+
+        let response = request_rpc_discover(inherited_address).await;
+        assert!(response.get("result").is_some());
+        assert!(response.get("error").is_none());
+
+        server_handle.abort();
+        let _ = server_handle.await;
+        shutdown.notify_waiters();
+        mock_server_handle.abort();
+    }
+
+    async fn request_rpc_discover(address: SocketAddr) -> Value {
+        let client = Client::new();
+        let uri: hyper::Uri = format!("http://{address}/rpc").parse().unwrap();
+        for _ in 0..40 {
+            let request = Request::post(uri.clone())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","method":"rpc.discover","id":1}"#,
+                ))
+                .unwrap();
+
+            if let Ok(response) = client.request(request).await {
+                if response.status().is_success() {
+                    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+                    return serde_json::from_slice(&body).unwrap();
+                }
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        panic!("RPC server did not become ready on inherited listener");
+    }
+}
+
+pub async fn build_rpc_server_with_inherited_listeners<'a>(
+    config: RpcServerConfig,
+    maybe_network_name: Option<String>,
+    sidecar_event_sender: Sender<SidecarEvent>,
+    inherited_main_listener: Option<TcpListener>,
+    inherited_speculative_listener: Option<TcpListener>,
+) -> MaybeRpcServerReturn<'a> {
     let (node_client, reconnect_loop, keepalive_loop) =
         FramedNodeClient::new(config.node_client.clone(), maybe_network_name).await?;
     let mut futures = Vec::new();
@@ -60,20 +165,24 @@ pub async fn build_rpc_server<'a>(
         node_client
     };
     if main_server_config.enable_server {
-        let future = run_rpc(main_server_config, node_client.clone())
-            .map(|q| {
-                if let Err(e) = q {
-                    error!("Rpc server finished with error: {e}");
-                }
-                Ok(ExitCode::SUCCESS)
-            })
-            .boxed();
+        let future = run_rpc(
+            main_server_config,
+            node_client.clone(),
+            inherited_main_listener,
+        )
+        .map(|q| {
+            if let Err(e) = q {
+                error!("Rpc server finished with error: {e}");
+            }
+            Ok(ExitCode::SUCCESS)
+        })
+        .boxed();
         futures.push(future);
     }
     let speculative_server_config = config.speculative_exec_server;
     if let Some(config) = speculative_server_config {
         if config.enable_server {
-            let future = run_speculative_exec(config, node_client)
+            let future = run_speculative_exec(config, node_client, inherited_speculative_listener)
                 .map(|q| {
                     if let Err(e) = q {
                         error!("Rpc speculative server finished with error: {e}");
@@ -111,37 +220,72 @@ async fn retype_future_vec(
     futures::future::select_all(futures).await.0
 }
 
-async fn run_rpc(config: RpcConfig, node_client: Arc<dyn NodeClient>) -> Result<(), Error> {
-    run_rpc_server(
-        node_client,
-        config.ip_address,
-        config.port,
-        config.default_limit(),
-        config.limits.unwrap_or_default(),
-        config.qps_limit,
-        config.max_body_bytes,
-        config.cors_origin,
-    )
-    .await;
-    Ok(())
+async fn run_rpc(
+    config: RpcConfig,
+    node_client: Arc<dyn NodeClient>,
+    inherited_listener: Option<TcpListener>,
+) -> Result<(), Error> {
+    match inherited_listener {
+        Some(listener) => http_server::run_with_bind_target(
+            node_client,
+            rpcs::BindTarget::Inherited(listener),
+            config.default_limit(),
+            config.limits.unwrap_or_default(),
+            config.qps_limit,
+            config.max_body_bytes,
+            config.cors_origin,
+        )
+        .await
+        .map_err(Error::from),
+        None => {
+            run_rpc_server(
+                node_client,
+                config.ip_address,
+                config.port,
+                config.default_limit(),
+                config.limits.unwrap_or_default(),
+                config.qps_limit,
+                config.max_body_bytes,
+                config.cors_origin,
+            )
+            .await;
+            Ok(())
+        }
+    }
 }
 
 async fn run_speculative_exec(
     config: SpeculativeExecConfig,
     node_client: Arc<dyn NodeClient>,
+    inherited_listener: Option<TcpListener>,
 ) -> anyhow::Result<()> {
-    run_speculative_exec_server(
-        node_client,
-        config.ip_address,
-        config.port,
-        config.default_limit(),
-        config.limits.unwrap_or_default(),
-        config.qps_limit,
-        config.max_body_bytes,
-        config.cors_origin,
-    )
-    .await;
-    Ok(())
+    match inherited_listener {
+        Some(listener) => speculative_exec_server::run_with_bind_target(
+            node_client,
+            rpcs::BindTarget::Inherited(listener),
+            config.default_limit(),
+            config.limits.unwrap_or_default(),
+            config.qps_limit,
+            config.max_body_bytes,
+            config.cors_origin,
+        )
+        .await
+        .map_err(Error::from),
+        None => {
+            run_speculative_exec_server(
+                node_client,
+                config.ip_address,
+                config.port,
+                config.default_limit(),
+                config.limits.unwrap_or_default(),
+                config.qps_limit,
+                config.max_body_bytes,
+                config.cors_origin,
+            )
+            .await;
+            Ok(())
+        }
+    }
 }
 
 fn encode_request(req: &Command, id: u16) -> Result<Vec<u8>, bytesrepr::Error> {

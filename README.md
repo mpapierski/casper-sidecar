@@ -190,6 +190,71 @@ This repository contains several sample configuration files that can be used as 
 
 Once you create the configuration file and are ready to run the Sidecar service, you must provide the configuration as an argument using the `-- --path-to-config` option as described [here](#running-the-sidecar).
 
+### Socket activation
+
+On Unix, Sidecar supports inheriting listening TCP sockets via the standard `LISTEN_PID`,
+`LISTEN_FDS`, and `LISTEN_FDNAMES` environment variables.
+
+Supported activation names:
+
+- `rpc-main`
+- `rpc-speculative`
+- `sse-publish`
+- `rest-api`
+- `admin-api`
+
+Behavior:
+
+- If `LISTEN_PID` matches the Sidecar process and a supported named listener is present, Sidecar uses that inherited listener instead of binding from config for that server.
+- If a supported name is absent, Sidecar falls back to the normal config-based bind behavior for that listener.
+- If the activation environment is malformed for the current process, Sidecar fails startup.
+- `[[sse_server.connections]]` is not part of socket activation. Those entries remain outbound node connections configured from TOML.
+
+Example `systemd` units:
+
+```ini
+# /etc/systemd/system/casper-sidecar.socket
+[Unit]
+Description=Casper Sidecar sockets
+
+[Socket]
+ListenStream=7777
+FileDescriptorName=rpc-main
+
+ListenStream=7778
+FileDescriptorName=rpc-speculative
+
+ListenStream=19999
+FileDescriptorName=sse-publish
+
+ListenStream=18888
+FileDescriptorName=rest-api
+
+ListenStream=18887
+FileDescriptorName=admin-api
+
+[Install]
+WantedBy=sockets.target
+```
+
+```ini
+# /etc/systemd/system/casper-sidecar.service
+[Unit]
+Description=Casper Sidecar
+Requires=casper-sidecar.socket
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/casper-sidecar --path-to-config /etc/casper-sidecar/config.toml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+You can define any subset of these sockets. If a `FileDescriptorName` is omitted from the socket
+unit, Sidecar falls back to the corresponding config-based bind for that listener.
+
 ### RPC server setup
 
 Here is an example configuration for the RPC API server:
@@ -234,6 +299,7 @@ max_attempts = 30
 - `main_server.enable_block_prefetch` - optional (default `false`). If set to `true` the [prefetching blocks feature](#prefetching-blocks-feature) will be enabled
 - `main_server.ip_address` - Ip address under which the main RPC API server will be available.
 - `main_server.port` - Port under which the main RPC API server will be available.
+- If the `rpc-main` activation socket is present, `main_server.ip_address` and `main_server.port` are ignored.
 - `main_server.qps_limit` - The maximum number of requests per second.
 - `main_server.max_body_bytes` - Maximum body size of request to API in bytes.
 - `main_server.cors_origin` - Configures the CORS origin.
@@ -243,6 +309,7 @@ max_attempts = 30
 - `speculative_exec_server.enable_server` - If set to true, the speculative RPC API server will be enabled.
 - `speculative_exec_server.ip_address` - Ip address under which the speculative RPC API server will be available.
 - `speculative_exec_server.port` - port under which the speculative RPC API server will be available.
+- If the `rpc-speculative` activation socket is present, `speculative_exec_server.ip_address` and `speculative_exec_server.port` are ignored.
 - `speculative_exec_server.qps_limit` - The maximum number of requests per second.
 - `speculative_exec_server.max_body_bytes` - Maximum body size of request to API in bytes.
 - `speculative_exec_server.cors_origin` - Configures the CORS origin.
@@ -378,6 +445,7 @@ event_stream_buffer_length = 5000
 ```
 
 - `event_stream_server.port` - The port under which the Sidecar's SSE server publishes events.
+- If the `sse-publish` activation socket is present, `event_stream_server.port` is ignored.
 - `event_stream_server.max_concurrent_subscribers` - The maximum number of subscribers that can monitor the Sidecar's event stream.
 - `event_stream_server.event_stream_buffer_length` - The number of events that the stream will hold in its buffer for reference when a subscriber reconnects.
 
@@ -396,6 +464,7 @@ request_timeout_in_seconds = 10
 
 - `enable_server` - If set to true, the RPC API server will be enabled.
 - `port` - The port for accessing the Sidecar's REST server. `18888` is the default, but operators are free to choose their own port as needed.
+- If the `rest-api` activation socket is present, `rest_api_server.port` is ignored.
 - `max_concurrent_requests` - The maximum total number of simultaneous requests that can be made to the REST server.
 - `max_requests_per_second` - The maximum total number of requests that can be made per second.
 - `request_timeout_in_seconds` - The total time before a request times out.
@@ -492,6 +561,7 @@ max_requests_per_second = 1
 
 - `enable_server` - If set to true, the RPC API server will be enabled.
 - `port` - The port for accessing the Sidecar's admin server.
+- If the `admin-api` activation socket is present, `admin_api_server.port` is ignored.
 - `max_concurrent_requests` - The maximum total number of simultaneous requests that can be sent to the admin server.
 - `max_requests_per_second` - The maximum total number of requests that can be sent per second to the admin server.
 
