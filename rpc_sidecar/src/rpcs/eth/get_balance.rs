@@ -253,7 +253,9 @@ spec = "osaka"
 block_gas_limit = 30000000
 base_fee = 1
 wei_per_mote = {wei_per_mote}
+max_nonce_gap = 0
 transaction_lanes = [[100, 131072, 1024, 1000000, 50]]
+preinstalls = []
 "#
         );
         ChainspecRawBytes::new(toml.into_bytes().into(), None, None)

@@ -542,6 +542,9 @@ pub enum InvalidTransactionOrDeploy {
     /// The EVM transaction nonce did not match the account nonce.
     #[error("The EVM transaction nonce does not match the account nonce")]
     TransactionEvmInvalidNonce,
+    /// The EVM transaction nonce is too far ahead of the account nonce.
+    #[error("The EVM transaction nonce is too far ahead of the account nonce")]
+    TransactionEvmNonceTooFarAhead,
     /// The EVM transaction has a positive effective priority fee per gas.
     #[error("The EVM transaction effective priority fee per gas is unsupported")]
     TransactionEvmPositiveEffectivePriorityFeePerGas,
@@ -554,6 +557,12 @@ pub enum InvalidTransactionOrDeploy {
     /// The EVM transaction gas limit exceeds the protocol transaction gas limit.
     #[error("The EVM transaction gas limit exceeds the protocol transaction gas limit")]
     TransactionEvmGasLimitExceedsTransactionGasLimit,
+    /// The EVM transaction gas price is below the base fee.
+    #[error("The EVM transaction gas price is below the base fee")]
+    TransactionEvmGasPriceBelowBaseFee,
+    /// The EVM transaction does not include a chain ID.
+    #[error("The EVM transaction is missing a chain ID")]
+    TransactionEvmMissingChainId,
     /// The transaction initiator address is invalid.
     #[error("The transaction initiator address is invalid")]
     TransactionInvalidInitiatorAddr,
@@ -832,6 +841,9 @@ impl From<ErrorCode> for InvalidTransactionOrDeploy {
             }
             ErrorCode::InvalidTransactionPricingMode => Self::TransactionPricingMode,
             ErrorCode::InvalidTransactionEvmInvalidNonce => Self::TransactionEvmInvalidNonce,
+            ErrorCode::InvalidTransactionEvmNonceTooFarAhead => {
+                Self::TransactionEvmNonceTooFarAhead
+            }
             ErrorCode::InvalidTransactionEvmPositiveEffectivePriorityFeePerGas => {
                 Self::TransactionEvmPositiveEffectivePriorityFeePerGas
             }
@@ -844,6 +856,10 @@ impl From<ErrorCode> for InvalidTransactionOrDeploy {
             ErrorCode::InvalidTransactionEvmGasLimitExceedsTransactionGasLimit => {
                 Self::TransactionEvmGasLimitExceedsTransactionGasLimit
             }
+            ErrorCode::InvalidTransactionEvmGasPriceBelowBaseFee => {
+                Self::TransactionEvmGasPriceBelowBaseFee
+            }
+            ErrorCode::InvalidTransactionEvmMissingChainId => Self::TransactionEvmMissingChainId,
             ErrorCode::InvalidTransactionInvalidInitiatorAddr => {
                 Self::TransactionInvalidInitiatorAddr
             }
@@ -1097,10 +1113,13 @@ impl Error {
                 | ErrorCode::InvalidTransactionUnableToCalculateGasCost
                 | ErrorCode::InvalidTransactionPricingMode
                 | ErrorCode::InvalidTransactionEvmInvalidNonce
+                | ErrorCode::InvalidTransactionEvmNonceTooFarAhead
                 | ErrorCode::InvalidTransactionEvmPositiveEffectivePriorityFeePerGas
                 | ErrorCode::InvalidTransactionEvmMaxPriorityFeePerGasExceedsMaxFeePerGas
                 | ErrorCode::InvalidTransactionEvmIntrinsicGasExceedsGasLimit
                 | ErrorCode::InvalidTransactionEvmGasLimitExceedsTransactionGasLimit
+                | ErrorCode::InvalidTransactionEvmGasPriceBelowBaseFee
+                | ErrorCode::InvalidTransactionEvmMissingChainId
                 | ErrorCode::InvalidTransactionInvalidInitiatorAddr
                 | ErrorCode::EmptyBlockchain
                 | ErrorCode::ExpectedDeploy

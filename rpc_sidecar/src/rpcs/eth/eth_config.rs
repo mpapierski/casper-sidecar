@@ -76,6 +76,7 @@ struct EvmConfigSchema {
     block_gas_limit: u64,
     base_fee: u64,
     wei_per_mote: u64,
+    max_nonce_gap: u64,
     transaction_lanes: Vec<[u64; 5]>,
     preinstalls: Vec<(evm::Address, evm::Hash)>,
 }
@@ -315,7 +316,9 @@ spec = "osaka"
 block_gas_limit = 30000000
 base_fee = 5000
 wei_per_mote = 1000000000
+max_nonce_gap = 0
 transaction_lanes = {lanes}
+preinstalls = []
 "#
         );
         ChainspecRawBytes::new(source.into_bytes().into(), None, None)
