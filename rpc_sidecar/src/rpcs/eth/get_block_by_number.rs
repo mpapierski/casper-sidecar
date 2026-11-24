@@ -357,7 +357,7 @@ spec = "osaka"
 block_gas_limit = 12345678
 base_fee = 3
 wei_per_mote = 1000000000
-max_nonce_gap = 0
+max_nonce_gap = 16
 transaction_lanes = [[100, 131072, 1024, 1000000, 50]]
 preinstalls = []
 "#

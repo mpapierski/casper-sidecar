@@ -132,6 +132,11 @@ impl ChainspecProjection {
                 "future EVM configuration has no transaction lanes",
             ));
         }
+        if evm.transaction_lanes().len() > 1 {
+            return Err(internal_error(
+                "future EVM configuration has more than one transaction lane",
+            ));
+        }
         let mut lane_ids = HashSet::from([MINT_LANE_ID, AUCTION_LANE_ID, INSTALL_UPGRADE_LANE_ID]);
         if let Some(v1) = self
             .transactions
@@ -316,7 +321,7 @@ spec = "osaka"
 block_gas_limit = 30000000
 base_fee = 5000
 wei_per_mote = 1000000000
-max_nonce_gap = 0
+max_nonce_gap = 16
 transaction_lanes = {lanes}
 preinstalls = []
 "#
@@ -394,6 +399,7 @@ preinstalls = []
         assert_eq!(value["last"], Value::Null);
         assert_eq!(value["current"]["casper"]["protocolVersion"], "2.2.2");
         assert_eq!(value["current"]["casper"]["evmConfig"]["spec"], "osaka");
+        assert_eq!(value["current"]["casper"]["evmConfig"]["max_nonce_gap"], 16);
         assert_eq!(
             value["current"]["casper"]["evmConfig"]["transaction_lanes"],
             json!([[100, 131072, 1024, 1000000, 50]])
@@ -604,6 +610,13 @@ preinstalls = []
         for future_raw in [
             None,
             Some(chainspec("2.3.0", "20", true, 7, "[]")),
+            Some(chainspec(
+                "2.3.0",
+                "20",
+                true,
+                7,
+                "[[100, 131072, 1024, 1000000, 50], [101, 262144, 65536, 15000000, 5]]",
+            )),
             Some(unknown_spec),
             Some(invalid_fee),
             Some(enabled("2.4.0", "20", 7)),

@@ -542,7 +542,7 @@ pub enum InvalidTransactionOrDeploy {
     /// The EVM transaction nonce did not match the account nonce.
     #[error("The EVM transaction nonce does not match the account nonce")]
     TransactionEvmInvalidNonce,
-    /// The EVM transaction nonce is too far ahead of the account nonce.
+    /// The EVM transaction nonce is beyond the configured admission window.
     #[error("The EVM transaction nonce is too far ahead of the account nonce")]
     TransactionEvmNonceTooFarAhead,
     /// The EVM transaction has a positive effective priority fee per gas.
@@ -2030,6 +2030,10 @@ mod tests {
         assert!(matches!(
             Error::from_error_code(ErrorCode::InvalidTransactionEvmInvalidNonce as u16),
             Error::InvalidTransaction(InvalidTransactionOrDeploy::TransactionEvmInvalidNonce)
+        ));
+        assert!(matches!(
+            Error::from_error_code(ErrorCode::InvalidTransactionEvmNonceTooFarAhead as u16),
+            Error::InvalidTransaction(InvalidTransactionOrDeploy::TransactionEvmNonceTooFarAhead)
         ));
         assert!(matches!(
             Error::from_error_code(
