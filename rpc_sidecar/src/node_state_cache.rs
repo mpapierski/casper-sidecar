@@ -25,7 +25,7 @@ use tracing::{info, warn};
 
 use crate::{
     ClientError, NodeClient, future_chainspec_cache::FutureChainspecCache,
-    rpcs::eth::syncing::SyncingResult,
+    node_client::parse_chainspec_toml, rpcs::eth::syncing::SyncingResult,
 };
 
 /// How often the SSE-disabled fallback poller asks the node for its protocol version.
@@ -205,7 +205,7 @@ impl NodeStateCache {
         let text = std::str::from_utf8(raw.chainspec_bytes()).map_err(|err| {
             ClientError::Deserialization(format!("chainspec bytes are not valid utf8: {err}"))
         })?;
-        let chainspec: Chainspec = toml::from_str(text)
+        let chainspec = parse_chainspec_toml(text)
             .map_err(|err| ClientError::Deserialization(format!("chainspec toml: {err}")))?;
         Ok(ChainspecEntry {
             protocol_version,

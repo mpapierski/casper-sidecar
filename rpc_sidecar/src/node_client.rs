@@ -51,6 +51,21 @@ const INITIAL_REQUEST_ID: u16 = 0;
 #[cfg(test)]
 const INITIAL_REQUEST_ID: u16 = 1;
 
+pub(crate) fn parse_chainspec_toml<T: DeserializeOwned>(text: &str) -> Result<T, toml::de::Error> {
+    toml::from_str(text).or_else(|error| {
+        let mut document: toml::Value = toml::from_str(text)?;
+        let Some(evm) = document.get_mut("evm").and_then(toml::Value::as_table_mut) else {
+            return Err(error);
+        };
+        if evm.contains_key("preinstalls") {
+            return Err(error);
+        }
+        // Older EVM nodes accept an omitted preinstall list and install nothing.
+        evm.insert("preinstalls".into(), toml::Value::Array(Vec::new()));
+        document.try_into()
+    })
+}
+
 #[async_trait]
 pub trait NodeClient: Send + Sync {
     async fn send_request(&self, req: Command) -> Result<BinaryResponseAndRequest, Error>;
@@ -294,7 +309,7 @@ pub trait NodeClient: Send + Sync {
         let text = std::str::from_utf8(raw.chainspec_bytes()).map_err(|err| {
             Error::Deserialization(format!("chainspec bytes are not valid utf8: {err}"))
         })?;
-        let chainspec = toml::from_str::<Chainspec>(text)
+        let chainspec = parse_chainspec_toml(text)
             .map_err(|err| Error::Deserialization(format!("chainspec toml: {err}")))?;
         Ok(Arc::new(chainspec))
     }

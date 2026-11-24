@@ -42,7 +42,7 @@ mod tests {
     use crate::rpcs::test_utils::BinaryPortMock;
 
     #[tokio::test]
-    async fn returns_chain_id_as_a_decimal_string() {
+    async fn returns_chain_id_from_a_chainspec_without_preinstalls() {
         let client = BinaryPortMock::new();
         let chainspec = ChainspecRawBytes::new(
             br#"
@@ -55,7 +55,6 @@ base_fee = 1
 wei_per_mote = 1000000000
 max_nonce_gap = 16
 transaction_lanes = [[100, 131072, 1024, 1000000, 50]]
-preinstalls = []
 "#
             .to_vec()
             .into(),

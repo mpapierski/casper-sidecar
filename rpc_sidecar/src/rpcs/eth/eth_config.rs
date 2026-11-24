@@ -14,7 +14,7 @@ use casper_types::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ClientError;
+use crate::{ClientError, node_client::parse_chainspec_toml};
 
 use super::{
     super::{NodeClient, RpcWithoutParams, docs::DocExample},
@@ -111,7 +111,7 @@ impl ChainspecProjection {
     fn from_raw(raw: &ChainspecRawBytes) -> Result<Self, RpcError> {
         let text = std::str::from_utf8(raw.chainspec_bytes())
             .map_err(|error| internal_error(format!("invalid chainspec bytes: {error}")))?;
-        toml::from_str(text)
+        parse_chainspec_toml(text)
             .map_err(|error| internal_error(format!("invalid eth_config chainspec: {error}")))
     }
 
